@@ -43,7 +43,69 @@ interface OperacionReciente {
 export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
   const [activeModule, setActiveModule]       = useState<Modulo>('home');
   const [activeSubModule, setActiveSubModule] = useState('');
-  const [isBovedaOpen, setIsBovedaOpen]       = useState(true);
+  const [isBovedaOpen, setIsBovedaOpen]       = useState(false);
+  const [cajaData, setCajaData] = useState<{ id: string; sucursal_id: string; usuario_id: string } | null>(null);
+  const [cajaLoading, setCajaLoading] = useState(false);
+
+  useEffect(() => {
+    const verificarCajaGlobal = async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        const currentUserId = user?.id;
+        if (!currentUserId) return;
+
+        const { data: sucData } = await supabase
+          .from('sucursales')
+          .select('id')
+          .eq('nombre', session.sucursal)
+          .maybeSingle();
+
+        if (sucData) {
+          const { data: cData } = await supabase
+            .from('cajas_operacion')
+            .select('id')
+            .eq('estado', 'abierta')
+            .eq('sucursal_id', sucData.id)
+            .eq('usuario_id', currentUserId)
+            .maybeSingle();
+
+          if (cData) {
+            setIsBovedaOpen(true);
+            setCajaData({ id: cData.id, sucursal_id: sucData.id, usuario_id: currentUserId });
+          } else {
+            setIsBovedaOpen(false);
+            setCajaData({ id: '', sucursal_id: sucData.id, usuario_id: currentUserId });
+          }
+        }
+      } catch (err) {
+        console.error('Error verificando caja:', err);
+      }
+    };
+    verificarCajaGlobal();
+  }, [session.sucursal]);
+
+  const toggleBoveda = async () => {
+    if (!cajaData || !cajaData.sucursal_id || !cajaData.usuario_id) return;
+    setCajaLoading(true);
+    try {
+      if (isBovedaOpen) {
+        await supabase.from('cajas_operacion').update({ estado: 'cerrada', fecha_cierre: new Date().toISOString() }).eq('id', cajaData.id);
+        setIsBovedaOpen(false);
+        setCajaData({ ...cajaData, id: '' });
+      } else {
+        const { data: newCaja } = await supabase.from('cajas_operacion').insert({ sucursal_id: cajaData.sucursal_id, usuario_id: cajaData.usuario_id, estado: 'abierta', saldo_inicial: 0 }).select('id').single();
+        if (newCaja) {
+          setIsBovedaOpen(true);
+          setCajaData({ ...cajaData, id: newCaja.id });
+        }
+      }
+    } catch (err: any) {
+      console.error('Error alternando caja:', err);
+      alert('Error alternando caja: ' + err.message);
+    } finally {
+      setCajaLoading(false);
+    }
+  };
   const [sidebarOpen, setSidebarOpen]         = useState(true);
   const [kpis, setKpis] = useState<KpiData>({ totalClientes: 0, creditosActivos: 0, montoDesembolsadoHoy: 0, cuotasVencidas: 0 });
   const [operaciones, setOperaciones] = useState<OperacionReciente[]>([]);
@@ -134,8 +196,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
             La caja de la sucursal está cerrada. Usa el botón <strong>"Abrir Caja"</strong> en la barra superior
             para habilitar los cobros y desembolsos del día.
           </p>
-          <button className="btn btn-primary" style={{ marginTop: '20px' }} onClick={() => setIsBovedaOpen(true)}>
-            Abrir Caja Ahora
+          <button className="btn btn-primary" style={{ marginTop: '20px' }} onClick={toggleBoveda} disabled={cajaLoading}>
+            {cajaLoading ? 'Abriendo...' : 'Abrir Caja Ahora'}
           </button>
         </div>
       );
@@ -406,10 +468,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
             </div>
             <button
               className="btn btn-secondary"
-              style={{ padding: '6px 14px', fontSize: '0.78rem' }}
-              onClick={() => setIsBovedaOpen(o => !o)}
+              style={{ padding: '6px 14px', fontSize: '0.78rem', opacity: cajaLoading ? 0.7 : 1 }}
+              onClick={toggleBoveda}
+              disabled={cajaLoading}
             >
-              {isBovedaOpen ? 'Cerrar Caja' : 'Abrir Caja'}
+              {cajaLoading ? 'Procesando...' : isBovedaOpen ? 'Cerrar Caja' : 'Abrir Caja'}
             </button>
           </div>
         </header>
