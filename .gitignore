@@ -1,0 +1,17 @@
+# Archivos sensibles - NO subir al repositorio público
+.env
+.env.local
+.env.production
+
+# Dependencias
+node_modules/
+
+# Build
+dist/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
