@@ -134,60 +134,25 @@ export const DesembolsoCredito: React.FC<DesembolsoCreditoProps> = ({ sucursalNo
     setProcesando(true);
     setErrorMsg(null);
 
-    let creditoCreadoId = null;
-    const codigoCredito = `LM-${String(Math.floor(Math.random() * 9000) + 1000)}`;
-
     try {
-      // 1. Crear el registro de crédito en la tabla creditos
-      const { data: credData, error: errorCredito } = await supabase
-        .from('creditos')
-        .insert({
-          solicitud_id: creditoSeleccionado.solicitudId,
-          codigo_credito: codigoCredito,
-          monto_desembolsado: creditoSeleccionado.monto,
-          estado: 'activo',
-        })
-        .select('id')
-        .single();
+      const { data: result, error: rpcError } = await supabase.rpc('rpc_desembolsar_credito', {
+        p_solicitud_id: creditoSeleccionado.solicitudId,
+        p_caja_operacion_id: cajaOperacionId,
+        p_monto_desembolsado: creditoSeleccionado.monto,
+        p_cliente_nombre: creditoSeleccionado.clienteNombre
+      });
 
-      if (errorCredito) throw errorCredito;
-      creditoCreadoId = credData.id;
-
-      // 2. Registrar movimiento de caja (Egreso de desembolso)
-      const { error: errMov } = await supabase
-        .from('movimientos_caja')
-        .insert([{
-          caja_operacion_id: cajaOperacionId,
-          tipo_movimiento: 'egreso',
-          categoria: 'desembolso',
-          monto: creditoSeleccionado.monto,
-          referencia_id: creditoSeleccionado.solicitudId,
-          descripcion: `Desembolso préstamo ${codigoCredito} — ${creditoSeleccionado.clienteNombre}`,
-        }]);
-
-      if (errMov) throw errMov;
-
-      // 3. Actualizar estado de la solicitud a 'desembolsada'
-      const { error: errorSolicitud } = await supabase
-        .from('solicitudes_credito')
-        .update({ estado: 'desembolsada' })
-        .eq('id', creditoSeleccionado.solicitudId);
-
-      if (errorSolicitud) throw errorSolicitud;
+      if (rpcError) throw rpcError;
 
       // Marcar como desembolsado localmente
       setCreditos(prev => prev.map(c => c.id === creditoSeleccionado.id ? { ...c, estado: 'desembolsado' as const } : c));
-      setExitoso(codigoCredito);
+      setExitoso(result.codigo_credito);
       setCreditoSeleccionado(null);
       setConfirmandoFechaPasada(false);
 
       // Recargar lista
       setTimeout(() => cargarCreditosAprobados(), 1500);
     } catch (err: any) {
-      // Rollback manual en frontend si falla la transacción posterior al insert de créditos
-      if (creditoCreadoId) {
-        await supabase.from('creditos').delete().eq('id', creditoCreadoId);
-      }
       setErrorMsg('Error al desembolsar: ' + err.message);
     } finally {
       setProcesando(false);

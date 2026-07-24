@@ -154,34 +154,16 @@ export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La M
     setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'procesando' }));
 
     try {
-      const nuevoMontoPagado = cuotaSeleccionada.montoPagado + montoACobrar;
-      const saldoRestante = cuotaSeleccionada.montoTotal - nuevoMontoPagado;
-      const nuevoEstado = saldoRestante <= 0.01 ? 'pagada' : 'pendiente';
+      const descripcionMovimiento = `Cobro cuota ${cuotaSeleccionada.numCuota}/${cuotaSeleccionada.totalCuotas} de crédito ${cuotaSeleccionada.codigoCredito} — ${cuotaSeleccionada.clienteNombre}`;
 
-      // 1. Registrar movimiento de caja (Ingreso)
-      const { error: errMov } = await supabase
-        .from('movimientos_caja')
-        .insert([{
-          caja_operacion_id: cajaOperacionId,
-          tipo_movimiento: 'ingreso',
-          categoria: 'cobro_cuota',
-          monto: montoACobrar,
-          descripcion: `Cobro cuota ${cuotaSeleccionada.numCuota}/${cuotaSeleccionada.totalCuotas} de crédito ${cuotaSeleccionada.codigoCredito} — ${cuotaSeleccionada.clienteNombre}`,
-        }]);
+      const { data: result, error: rpcError } = await supabase.rpc('rpc_cobrar_cuota', {
+        p_cuota_id: cuotaSeleccionada.id,
+        p_caja_operacion_id: cajaOperacionId,
+        p_monto_a_cobrar: montoACobrar,
+        p_descripcion_movimiento: descripcionMovimiento
+      });
 
-      if (errMov) throw errMov;
-
-      // 2. Actualizar cuota
-      const { error: errCuota } = await supabase
-        .from('cuotas')
-        .update({
-          monto_pagado: nuevoMontoPagado,
-          estado: nuevoEstado,
-          fecha_pago: nuevoEstado === 'pagada' ? new Date().toISOString() : null,
-        })
-        .eq('id', cuotaSeleccionada.id);
-
-      if (errCuota) throw errCuota;
+      if (rpcError) throw rpcError;
 
       setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'cobrado' }));
       mostrarMsg('ok', `Cobro de S/. ${montoACobrar.toFixed(2)} registrado en caja y cuota actualizada.`);
