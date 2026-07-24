@@ -15,9 +15,10 @@ interface CreditoListo {
 
 interface DesembolsoCreditoProps {
   sucursalNombre?: string;
+  cajaOperacionIdGlobal?: string | null;
 }
 
-export const DesembolsoCredito: React.FC<DesembolsoCreditoProps> = ({ sucursalNombre = 'La Merced' }) => {
+export const DesembolsoCredito: React.FC<DesembolsoCreditoProps> = ({ sucursalNombre = 'La Merced', cajaOperacionIdGlobal }) => {
   const [creditos, setCreditos] = useState<CreditoListo[]>([]);
   const [loading, setLoading] = useState(true);
   const [creditoSeleccionado, setCreditoSeleccionado] = useState<CreditoListo | null>(null);
@@ -26,10 +27,17 @@ export const DesembolsoCredito: React.FC<DesembolsoCreditoProps> = ({ sucursalNo
   const [exitoso, setExitoso] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(null);
-  const [checkingCaja, setCheckingCaja] = useState(true);
+  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(cajaOperacionIdGlobal || null);
+  const [checkingCaja, setCheckingCaja] = useState(false);
+
+  useEffect(() => {
+    if (cajaOperacionIdGlobal !== undefined) {
+      setCajaOperacionId(cajaOperacionIdGlobal);
+    }
+  }, [cajaOperacionIdGlobal]);
 
   const verificarCaja = async () => {
+    if (cajaOperacionIdGlobal !== undefined) return; // Si viene por prop, no consultamos
     setCheckingCaja(true);
     try {
       const { data: sucData } = await supabase

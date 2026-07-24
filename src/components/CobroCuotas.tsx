@@ -17,9 +17,10 @@ type EstadoPago = 'pendiente' | 'procesando' | 'cobrado';
 
 interface CobroCuotasProps {
   sucursalNombre?: string;
+  cajaOperacionIdGlobal?: string | null;
 }
 
-export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La Merced' }) => {
+export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La Merced', cajaOperacionIdGlobal }) => {
   const [cuotas, setCuotas] = useState<CuotaPendiente[]>([]);
   const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState('');
@@ -28,8 +29,14 @@ export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La M
   const [estadosPago, setEstadosPago] = useState<Record<string, EstadoPago>>({});
   const [mensaje, setMensaje] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
 
-  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(null);
-  const [checkingCaja, setCheckingCaja] = useState(true);
+  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(cajaOperacionIdGlobal || null);
+  const [checkingCaja, setCheckingCaja] = useState(false);
+
+  useEffect(() => {
+    if (cajaOperacionIdGlobal !== undefined) {
+      setCajaOperacionId(cajaOperacionIdGlobal);
+    }
+  }, [cajaOperacionIdGlobal]);
 
   const mostrarMsg = (tipo: 'ok' | 'error', texto: string) => {
     setMensaje({ tipo, texto });
@@ -37,6 +44,7 @@ export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La M
   };
 
   const verificarCaja = async () => {
+    if (cajaOperacionIdGlobal !== undefined) return; // Si viene por prop, no consultamos
     setCheckingCaja(true);
     try {
       const { data: sucData } = await supabase
