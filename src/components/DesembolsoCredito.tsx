@@ -13,7 +13,11 @@ interface CreditoListo {
   estado: 'listo' | 'desembolsado' | 'fecha_pasada';
 }
 
-export const DesembolsoCredito: React.FC = () => {
+interface DesembolsoCreditoProps {
+  sucursalNombre?: string;
+}
+
+export const DesembolsoCredito: React.FC<DesembolsoCreditoProps> = ({ sucursalNombre = 'La Merced' }) => {
   const [creditos, setCreditos] = useState<CreditoListo[]>([]);
   const [loading, setLoading] = useState(true);
   const [creditoSeleccionado, setCreditoSeleccionado] = useState<CreditoListo | null>(null);
@@ -21,6 +25,43 @@ export const DesembolsoCredito: React.FC = () => {
   const [procesando, setProcesando] = useState(false);
   const [exitoso, setExitoso] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(null);
+  const [checkingCaja, setCheckingCaja] = useState(true);
+
+  const verificarCaja = async () => {
+    setCheckingCaja(true);
+    try {
+      const { data: sucData } = await supabase
+        .from('sucursales')
+        .select('id')
+        .eq('nombre', sucursalNombre)
+        .maybeSingle();
+
+      if (sucData) {
+        const { data: { user } } = await supabase.auth.getUser();
+        const currentUserId = user?.id || '00000000-0000-0000-0000-000000000000';
+
+        const { data: cajaData } = await supabase
+          .from('cajas_operacion')
+          .select('id')
+          .eq('estado', 'abierta')
+          .eq('sucursal_id', sucData.id)
+          .eq('usuario_id', currentUserId)
+          .maybeSingle();
+
+        if (cajaData) {
+          setCajaOperacionId(cajaData.id);
+        } else {
+          setCajaOperacionId(null);
+        }
+      }
+    } catch (err) {
+      console.error('Error verificando caja:', err);
+    } finally {
+      setCheckingCaja(false);
+    }
+  };
 
   const cargarCreditosAprobados = async () => {
     setLoading(true);
@@ -48,7 +89,7 @@ export const DesembolsoCredito: React.FC = () => {
           return {
             id: s.id,
             solicitudId: s.id,
-            codigo: `LM-${String(1000 + i).slice(1)}`,
+            codigo: `SOL-${String(1000 + i).slice(1)}`,
             clienteNombre: s.clientes?.nombre_completo || 'Cliente Desconocido',
             monto: parseFloat(s.monto_solicitado) || 0,
             asesor: s.perfiles?.nombre_completo || 'Asesor',
@@ -69,7 +110,10 @@ export const DesembolsoCredito: React.FC = () => {
     }
   };
 
-  useEffect(() => { cargarCreditosAprobados(); }, []);
+  useEffect(() => {
+    verificarCaja();
+    cargarCreditosAprobados();
+  }, [sucursalNombre]);
 
   const handleSeleccionar = (c: CreditoListo) => {
     setCreditoSeleccionado(c);
@@ -79,6 +123,10 @@ export const DesembolsoCredito: React.FC = () => {
 
   const handleDesembolsar = async () => {
     if (!creditoSeleccionado) return;
+    if (!cajaOperacionId) {
+      setErrorMsg('No se puede desembolsar: La caja de operaciones debe estar abierta para esta sucursal.');
+      return;
+    }
     if (creditoSeleccionado.estado === 'fecha_pasada' && !confirmandoFechaPasada) {
       setConfirmandoFechaPasada(true);
       return;
@@ -86,21 +134,40 @@ export const DesembolsoCredito: React.FC = () => {
     setProcesando(true);
     setErrorMsg(null);
 
+    let creditoCreadoId = null;
+    const codigoCredito = `LM-${String(Math.floor(Math.random() * 9000) + 1000)}`;
+
     try {
       // 1. Crear el registro de crédito en la tabla creditos
-      const codigoCredito = `LM-${String(Math.floor(Math.random() * 9000) + 1000)}`;
-      const { error: errorCredito } = await supabase
+      const { data: credData, error: errorCredito } = await supabase
         .from('creditos')
         .insert({
           solicitud_id: creditoSeleccionado.solicitudId,
           codigo_credito: codigoCredito,
           monto_desembolsado: creditoSeleccionado.monto,
           estado: 'activo',
-        });
+        })
+        .select('id')
+        .single();
 
       if (errorCredito) throw errorCredito;
+      creditoCreadoId = credData.id;
 
-      // 2. Actualizar estado de la solicitud a 'desembolsada'
+      // 2. Registrar movimiento de caja (Egreso de desembolso)
+      const { error: errMov } = await supabase
+        .from('movimientos_caja')
+        .insert([{
+          caja_operacion_id: cajaOperacionId,
+          tipo_movimiento: 'egreso',
+          categoria: 'desembolso',
+          monto: creditoSeleccionado.monto,
+          referencia_id: creditoSeleccionado.solicitudId,
+          descripcion: `Desembolso préstamo ${codigoCredito} — ${creditoSeleccionado.clienteNombre}`,
+        }]);
+
+      if (errMov) throw errMov;
+
+      // 3. Actualizar estado de la solicitud a 'desembolsada'
       const { error: errorSolicitud } = await supabase
         .from('solicitudes_credito')
         .update({ estado: 'desembolsada' })
@@ -117,6 +184,10 @@ export const DesembolsoCredito: React.FC = () => {
       // Recargar lista
       setTimeout(() => cargarCreditosAprobados(), 1500);
     } catch (err: any) {
+      // Rollback manual en frontend si falla la transacción posterior al insert de créditos
+      if (creditoCreadoId) {
+        await supabase.from('creditos').delete().eq('id', creditoCreadoId);
+      }
       setErrorMsg('Error al desembolsar: ' + err.message);
     } finally {
       setProcesando(false);
@@ -133,6 +204,18 @@ export const DesembolsoCredito: React.FC = () => {
             Créditos aprobados listos para entrega de efectivo.
           </p>
         </div>
+
+        {checkingCaja ? (
+          <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px 14px', borderRadius: '10px' }}>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Verificando estado de la caja sucursal...</p>
+          </div>
+        ) : !cajaOperacionId ? (
+          <div style={{ background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.3)', borderRadius: '10px', padding: '12px 16px' }}>
+            <p style={{ fontSize: '0.85rem', color: 'var(--danger)', fontWeight: 600 }}>
+              ⚠ Caja Cerrada: Debes abrir la caja de operaciones del día desde el menú superior para poder procesar desembolsos.
+            </p>
+          </div>
+        ) : null}
 
         {exitoso && (
           <div className="animate-fade" style={{ background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '12px', padding: '14px 18px' }}>
@@ -253,7 +336,7 @@ export const DesembolsoCredito: React.FC = () => {
                 className="btn btn-primary"
                 style={{ width: '100%' }}
                 onClick={handleDesembolsar}
-                disabled={procesando}
+                disabled={procesando || !cajaOperacionId}
               >
                 {procesando ? 'Procesando...' : confirmandoFechaPasada ? '⚠ Confirmar de todas formas' : '✓ Ejecutar Desembolso'}
               </button>

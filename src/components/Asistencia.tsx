@@ -12,18 +12,11 @@ interface AsistenciaRegistro {
   estado: 'presente' | 'salida_registrada';
 }
 
-interface PerfilSupabase {
-  id: string;
-  nombre_completo: string;
-  rol: string;
-}
-
 const HOY = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 const HOY_LOCAL = new Date().toLocaleDateString('es-PE');
 
 export const Asistencia: React.FC = () => {
   const [registros, setRegistros]   = useState<AsistenciaRegistro[]>([]);
-  const [perfiles, setPerfiles]     = useState<PerfilSupabase[]>([]);
   const [dniBusqueda, setDniBusqueda] = useState('');
   const [mensaje, setMensaje]       = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
   const [procesando, setProcesando] = useState(false);
@@ -47,7 +40,8 @@ export const Asistencia: React.FC = () => {
           hora_salida,
           perfiles (
             nombre_completo,
-            rol
+            rol,
+            dni
           )
         `)
         .eq('fecha', HOY)
@@ -58,7 +52,7 @@ export const Asistencia: React.FC = () => {
       if (data) {
         const mapped: AsistenciaRegistro[] = data.map((r: any) => ({
           id: r.id,
-          dni: '—',
+          dni: r.perfiles?.dni || '—',
           nombre: r.perfiles?.nombre_completo || 'Empleado Desconocido',
           rol: r.perfiles?.rol || '—',
           horaEntrada: r.hora_entrada ? r.hora_entrada.slice(0, 5) : '—',
@@ -75,82 +69,78 @@ export const Asistencia: React.FC = () => {
     }
   };
 
-  // Cargar perfiles de empleados por DNI (para fichaje)
-  const cargarPerfiles = async () => {
-    try {
-      const { data } = await supabase
-        .from('perfiles')
-        .select('id, nombre_completo, rol')
-        .eq('activo', true);
-      if (data) setPerfiles(data);
-    } catch (err) {
-      console.error('Error cargando perfiles:', err);
-    }
-  };
-
   useEffect(() => {
     cargarAsistencia();
-    cargarPerfiles();
   }, []);
 
   const handleFichar = async () => {
-    if (!procesando) {
-      // Modo demo: fichar con cualquier ID de perfil disponible
-      setProcesando(true);
-      const ahora = new Date();
-      const horaStr = ahora.toTimeString().slice(0, 8); // HH:MM:SS
+    if (dniBusqueda.length !== 8) {
+      mostrarMensaje('error', 'El DNI debe tener 8 dígitos.');
+      return;
+    }
+    if (procesando) return;
+    
+    setProcesando(true);
+    const ahora = new Date();
+    const horaStr = ahora.toTimeString().slice(0, 8); // HH:MM:SS
 
-      try {
-        // Buscar si ya hay un registro hoy para el perfil demo
-        const perfilDemo = perfiles[0]; // Usa el primer perfil disponible como demo
-        if (!perfilDemo) {
-          mostrarMensaje('error', 'No hay perfiles registrados. Ejecuta el SQL de relax_constraints.sql en Supabase.');
-          setProcesando(false);
-          return;
-        }
+    try {
+      // 1. Buscar perfil por DNI ingresado
+      const { data: perfil, error: errPerfil } = await supabase
+        .from('perfiles')
+        .select('id, nombre_completo, rol')
+        .eq('dni', dniBusqueda)
+        .eq('activo', true)
+        .maybeSingle();
 
-        const { data: existente } = await supabase
-          .from('asistencia')
-          .select('id, hora_salida')
-          .eq('usuario_id', perfilDemo.id)
-          .eq('fecha', HOY)
-          .maybeSingle();
+      if (errPerfil) throw errPerfil;
+      if (!perfil) {
+        mostrarMensaje('error', `Colaborador con DNI ${dniBusqueda} no encontrado o inactivo.`);
+        setProcesando(false);
+        return;
+      }
 
-        if (existente) {
-          if (existente.hora_salida) {
-            mostrarMensaje('error', `${perfilDemo.nombre_completo} ya registró su salida hoy.`);
-          } else {
-            // Registrar salida
-            const { error } = await supabase
-              .from('asistencia')
-              .update({ hora_salida: horaStr })
-              .eq('id', existente.id);
+      // 2. Buscar si ya hay un registro hoy para ese usuario
+      const { data: existente } = await supabase
+        .from('asistencia')
+        .select('id, hora_salida')
+        .eq('usuario_id', perfil.id)
+        .eq('fecha', HOY)
+        .maybeSingle();
 
-            if (error) throw error;
-            mostrarMensaje('ok', `Salida registrada para ${perfilDemo.nombre_completo} a las ${horaStr.slice(0,5)}.`);
-          }
+      if (existente) {
+        if (existente.hora_salida) {
+          mostrarMensaje('error', `${perfil.nombre_completo} ya registró su salida hoy.`);
         } else {
-          // Registrar entrada
+          // Registrar salida
           const { error } = await supabase
             .from('asistencia')
-            .insert([{
-              usuario_id: perfilDemo.id,
-              sucursal_id: null,
-              fecha: HOY,
-              hora_entrada: horaStr
-            }]);
+            .update({ hora_salida: horaStr })
+            .eq('id', existente.id);
 
           if (error) throw error;
-          mostrarMensaje('ok', `Entrada registrada para ${perfilDemo.nombre_completo} a las ${horaStr.slice(0,5)}.`);
+          mostrarMensaje('ok', `Salida registrada para ${perfil.nombre_completo} a las ${horaStr.slice(0,5)}.`);
         }
+      } else {
+        // Registrar entrada
+        const { error } = await supabase
+          .from('asistencia')
+          .insert([{
+            usuario_id: perfil.id,
+            fecha: HOY,
+            hora_entrada: horaStr
+          }]);
 
-        setDniBusqueda('');
-        await cargarAsistencia();
-      } catch (err: any) {
-        mostrarMensaje('error', 'Error al fichar: ' + err.message);
-      } finally {
-        setProcesando(false);
+        if (error) throw error;
+        mostrarMensaje('ok', `Entrada registrada para ${perfil.nombre_completo} a las ${horaStr.slice(0,5)}.`);
       }
+
+      setDniBusqueda('');
+      await cargarAsistencia();
+    } catch (err: any) {
+      mostrarMensaje('error', 'Error al fichar: ' + err.message);
+    } finally {
+      setProcesando(false);
     }
   };
 
@@ -159,6 +149,7 @@ export const Asistencia: React.FC = () => {
 
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '22px' }}>
+      {/* Header */}
       <div>
         <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Registro de Asistencia</h3>
         <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
@@ -219,7 +210,7 @@ export const Asistencia: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['Colaborador', 'Rol', 'Entrada', 'Salida', 'Estado'].map(h => (
+              {['Colaborador', 'DNI', 'Rol', 'Entrada', 'Salida', 'Estado'].map(h => (
                 <th key={h} style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, textAlign: 'left', paddingBottom: '12px', borderBottom: '1px solid var(--border)', paddingRight: '16px' }}>{h}</th>
               ))}
             </tr>
@@ -227,15 +218,16 @@ export const Asistencia: React.FC = () => {
           <tbody>
             {loadingLista ? (
               <tr>
-                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px', fontSize: '0.85rem' }}>Cargando asistencia...</td>
+                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px', fontSize: '0.85rem' }}>Cargando asistencia...</td>
               </tr>
             ) : registros.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px', fontSize: '0.85rem' }}>No hay registros de asistencia para el día de hoy.</td>
+                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px', fontSize: '0.85rem' }}>No hay registros de asistencia para el día de hoy.</td>
               </tr>
             ) : registros.map(r => (
               <tr key={r.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
                 <td style={{ padding: '12px 16px 12px 0', fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 600 }}>{r.nombre}</td>
+                <td style={{ padding: '12px 16px 12px 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{r.dni}</td>
                 <td style={{ padding: '12px 16px 12px 0', fontSize: '0.82rem', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{r.rol}</td>
                 <td style={{ padding: '12px 16px 12px 0', fontSize: '0.82rem', color: 'var(--success)', fontWeight: 600 }}>{r.horaEntrada}</td>
                 <td style={{ padding: '12px 16px 12px 0', fontSize: '0.82rem', color: r.horaSalida ? 'var(--text-secondary)' : 'var(--text-muted)' }}>

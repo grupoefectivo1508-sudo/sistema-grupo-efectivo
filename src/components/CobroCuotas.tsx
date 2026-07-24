@@ -15,7 +15,11 @@ interface CuotaPendiente {
 
 type EstadoPago = 'pendiente' | 'procesando' | 'cobrado';
 
-export const CobroCuotas: React.FC = () => {
+interface CobroCuotasProps {
+  sucursalNombre?: string;
+}
+
+export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La Merced' }) => {
   const [cuotas, setCuotas] = useState<CuotaPendiente[]>([]);
   const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState('');
@@ -24,9 +28,46 @@ export const CobroCuotas: React.FC = () => {
   const [estadosPago, setEstadosPago] = useState<Record<string, EstadoPago>>({});
   const [mensaje, setMensaje] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
 
+  const [cajaOperacionId, setCajaOperacionId] = useState<string | null>(null);
+  const [checkingCaja, setCheckingCaja] = useState(true);
+
   const mostrarMsg = (tipo: 'ok' | 'error', texto: string) => {
     setMensaje({ tipo, texto });
     setTimeout(() => setMensaje(null), 4000);
+  };
+
+  const verificarCaja = async () => {
+    setCheckingCaja(true);
+    try {
+      const { data: sucData } = await supabase
+        .from('sucursales')
+        .select('id')
+        .eq('nombre', sucursalNombre)
+        .maybeSingle();
+
+      if (sucData) {
+        const { data: { user } } = await supabase.auth.getUser();
+        const currentUserId = user?.id || '00000000-0000-0000-0000-000000000000';
+
+        const { data: cajaData } = await supabase
+          .from('cajas_operacion')
+          .select('id')
+          .eq('estado', 'abierta')
+          .eq('sucursal_id', sucData.id)
+          .eq('usuario_id', currentUserId)
+          .maybeSingle();
+
+        if (cajaData) {
+          setCajaOperacionId(cajaData.id);
+        } else {
+          setCajaOperacionId(null);
+        }
+      }
+    } catch (err) {
+      console.error('Error verificando caja:', err);
+    } finally {
+      setCheckingCaja(false);
+    }
   };
 
   const cargarCuotas = async () => {
@@ -85,7 +126,10 @@ export const CobroCuotas: React.FC = () => {
     }
   };
 
-  useEffect(() => { cargarCuotas(); }, []);
+  useEffect(() => {
+    verificarCaja();
+    cargarCuotas();
+  }, [sucursalNombre]);
 
   const cuotasFiltradas = cuotas.filter(c =>
     c.clienteNombre.toLowerCase().includes(busqueda.toLowerCase()) ||
@@ -99,6 +143,11 @@ export const CobroCuotas: React.FC = () => {
 
   const handleCobrar = async () => {
     if (!cuotaSeleccionada) return;
+    if (!cajaOperacionId) {
+      mostrarMsg('error', 'No se puede cobrar: La caja de operaciones debe estar abierta para esta sucursal.');
+      return;
+    }
+
     const montoACobrar = parseFloat(montoPagado || '0');
     if (montoACobrar <= 0) return;
 
@@ -109,7 +158,21 @@ export const CobroCuotas: React.FC = () => {
       const saldoRestante = cuotaSeleccionada.montoTotal - nuevoMontoPagado;
       const nuevoEstado = saldoRestante <= 0.01 ? 'pagada' : 'pendiente';
 
-      const { error } = await supabase
+      // 1. Registrar movimiento de caja (Ingreso)
+      const { error: errMov } = await supabase
+        .from('movimientos_caja')
+        .insert([{
+          caja_operacion_id: cajaOperacionId,
+          tipo_movimiento: 'ingreso',
+          categoria: 'cobro_cuota',
+          monto: montoACobrar,
+          descripcion: `Cobro cuota ${cuotaSeleccionada.numCuota}/${cuotaSeleccionada.totalCuotas} de crédito ${cuotaSeleccionada.codigoCredito} — ${cuotaSeleccionada.clienteNombre}`,
+        }]);
+
+      if (errMov) throw errMov;
+
+      // 2. Actualizar cuota
+      const { error: errCuota } = await supabase
         .from('cuotas')
         .update({
           monto_pagado: nuevoMontoPagado,
@@ -118,10 +181,10 @@ export const CobroCuotas: React.FC = () => {
         })
         .eq('id', cuotaSeleccionada.id);
 
-      if (error) throw error;
+      if (errCuota) throw errCuota;
 
       setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'cobrado' }));
-      mostrarMsg('ok', `Cobro de S/. ${montoACobrar.toFixed(2)} registrado exitosamente para ${cuotaSeleccionada.clienteNombre}.`);
+      mostrarMsg('ok', `Cobro de S/. ${montoACobrar.toFixed(2)} registrado en caja y cuota actualizada.`);
       setCuotaSeleccionada(null);
       setMontoPagado('');
       await cargarCuotas();
@@ -139,6 +202,18 @@ export const CobroCuotas: React.FC = () => {
           <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Cobrar Cuotas</h3>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Busca al cliente y selecciona la cuota a cobrar.</p>
         </div>
+
+        {checkingCaja ? (
+          <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px 14px', borderRadius: '10px' }}>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Verificando estado de la caja sucursal...</p>
+          </div>
+        ) : !cajaOperacionId ? (
+          <div style={{ background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.3)', borderRadius: '10px', padding: '12px 16px' }}>
+            <p style={{ fontSize: '0.85rem', color: 'var(--danger)', fontWeight: 600 }}>
+              ⚠ Caja Cerrada: Debes abrir la caja de operaciones del día desde el menú superior para poder procesar pagos.
+            </p>
+          </div>
+        ) : null}
 
         {mensaje && (
           <div className="animate-fade" style={{
@@ -261,7 +336,7 @@ export const CobroCuotas: React.FC = () => {
                 className="btn btn-primary"
                 style={{ width: '100%', marginTop: '8px' }}
                 onClick={handleCobrar}
-                disabled={!montoPagado || parseFloat(montoPagado) <= 0}
+                disabled={!montoPagado || parseFloat(montoPagado) <= 0 || !cajaOperacionId}
               >
                 ✓ Confirmar Cobro de S/. {parseFloat(montoPagado || '0').toFixed(2)}
               </button>

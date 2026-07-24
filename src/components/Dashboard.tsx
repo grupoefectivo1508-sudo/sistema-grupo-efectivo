@@ -155,7 +155,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
       return <SaldosAsesor />;
     }
     if (activeModule === 'caja' && activeSubModule === 'cobrar') {
-      return <CobroCuotas />;
+      return <CobroCuotas sucursalNombre={session.sucursal} />;
     }
     if (activeModule === 'credito' && activeSubModule === 'simular') {
       return <SimuladorCredito />;
@@ -164,7 +164,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
       return <RegistrarSolicitud sucursalNombre={session.sucursal} />;
     }
     if (activeModule === 'caja' && activeSubModule === 'desembolsar') {
-      return <DesembolsoCredito />;
+      return <DesembolsoCredito sucursalNombre={session.sucursal} />;
     }
     if (activeModule === 'caja' && activeSubModule === 'operaciones') {
       return <OperacionesCaja />;

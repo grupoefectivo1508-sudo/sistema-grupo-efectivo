@@ -158,12 +158,15 @@ export const RegistrarSolicitud: React.FC<RegistrarSolicitudProps> = ({ sucursal
     setLoading(true);
 
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const currentAsesorId = user?.id || '00000000-0000-0000-0000-000000000000';
+
       const { error } = await supabase
         .from('solicitudes_credito')
         .insert([{
           cliente_id: selectedClienteId,
           sucursal_id: realSucursalId,
-          asesor_id: '00000000-0000-0000-0000-000000000000', // Perfil mock
+          asesor_id: currentAsesorId,
           monto_solicitado: parseFloat(form.monto),
           tasa_interes_mensual: parseFloat(form.tasa),
           tipo_periodo: form.tipoPeriodo,
