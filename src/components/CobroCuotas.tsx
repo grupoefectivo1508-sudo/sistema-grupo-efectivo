@@ -164,7 +164,7 @@ export const CobroCuotas: React.FC<CobroCuotasProps> = ({ sucursalNombre = 'La M
     try {
       const descripcionMovimiento = `Cobro cuota ${cuotaSeleccionada.numCuota}/${cuotaSeleccionada.totalCuotas} de crédito ${cuotaSeleccionada.codigoCredito} — ${cuotaSeleccionada.clienteNombre}`;
 
-      const { data: result, error: rpcError } = await supabase.rpc('rpc_cobrar_cuota', {
+      const { error: rpcError } = await supabase.rpc('rpc_cobrar_cuota', {
         p_cuota_id: cuotaSeleccionada.id,
         p_caja_operacion_id: cajaOperacionId,
         p_monto_a_cobrar: montoACobrar,
