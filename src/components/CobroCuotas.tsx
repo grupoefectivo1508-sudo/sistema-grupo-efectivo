@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface CuotaPendiente {
   id: string;
@@ -8,42 +9,126 @@ interface CuotaPendiente {
   totalCuotas: number;
   fechaVencimiento: string;
   montoTotal: number;
+  montoPagado: number;
   diasAtraso: number;
 }
-
-const CUOTAS_DEMO: CuotaPendiente[] = [
-  { id: '1', codigoCredito: 'LM-0041', clienteNombre: 'GARCIA HUAMAN, Rosa Elena', numCuota: 4, totalCuotas: 12, fechaVencimiento: '20/07/2026', montoTotal: 180.50, diasAtraso: 3 },
-  { id: '2', codigoCredito: 'LM-0078', clienteNombre: 'MENDOZA RAMOS, Luis Alfredo', numCuota: 1, totalCuotas: 6, fechaVencimiento: '23/07/2026', montoTotal: 550.00, diasAtraso: 0 },
-  { id: '3', codigoCredito: 'LM-0023', clienteNombre: 'HUANUCO RAMOS, Felix', numCuota: 2, totalCuotas: 10, fechaVencimiento: '17/07/2026', montoTotal: 95.00, diasAtraso: 7 },
-  { id: '4', codigoCredito: 'LM-0105', clienteNombre: 'SALAZAR POMA, Gladys', numCuota: 3, totalCuotas: 8, fechaVencimiento: '01/07/2026', montoTotal: 490.00, diasAtraso: 22 },
-];
 
 type EstadoPago = 'pendiente' | 'procesando' | 'cobrado';
 
 export const CobroCuotas: React.FC = () => {
+  const [cuotas, setCuotas] = useState<CuotaPendiente[]>([]);
+  const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState('');
   const [cuotaSeleccionada, setCuotaSeleccionada] = useState<CuotaPendiente | null>(null);
   const [montoPagado, setMontoPagado] = useState('');
   const [estadosPago, setEstadosPago] = useState<Record<string, EstadoPago>>({});
+  const [mensaje, setMensaje] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
 
-  const cuotasFiltradas = CUOTAS_DEMO.filter(c =>
+  const mostrarMsg = (tipo: 'ok' | 'error', texto: string) => {
+    setMensaje({ tipo, texto });
+    setTimeout(() => setMensaje(null), 4000);
+  };
+
+  const cargarCuotas = async () => {
+    setLoading(true);
+    try {
+      const hoy = new Date().toISOString().split('T')[0];
+      const { data, error } = await supabase
+        .from('cuotas')
+        .select(`
+          id,
+          numero_cuota,
+          fecha_vencimiento,
+          monto_total,
+          monto_pagado,
+          estado,
+          creditos (
+            codigo_credito,
+            solicitudes_credito (
+              numero_cuotas,
+              clientes ( nombre_completo )
+            )
+          )
+        `)
+        .in('estado', ['pendiente', 'mora'])
+        .order('fecha_vencimiento', { ascending: true })
+        .limit(50);
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const mapped: CuotaPendiente[] = data.map((c: any) => {
+          const fv = new Date(c.fecha_vencimiento);
+          const hoyDate = new Date(hoy);
+          const diff = Math.floor((hoyDate.getTime() - fv.getTime()) / (1000 * 60 * 60 * 24));
+          return {
+            id: c.id,
+            codigoCredito: c.creditos?.codigo_credito || '—',
+            clienteNombre: c.creditos?.solicitudes_credito?.clientes?.nombre_completo || 'Cliente Desconocido',
+            numCuota: c.numero_cuota,
+            totalCuotas: c.creditos?.solicitudes_credito?.numero_cuotas || 0,
+            fechaVencimiento: fv.toLocaleDateString('es-PE'),
+            montoTotal: parseFloat(c.monto_total) || 0,
+            montoPagado: parseFloat(c.monto_pagado) || 0,
+            diasAtraso: Math.max(0, diff),
+          };
+        });
+        setCuotas(mapped);
+      } else {
+        setCuotas([]);
+      }
+    } catch (err: any) {
+      console.error('Error cargando cuotas:', err.message);
+      setCuotas([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { cargarCuotas(); }, []);
+
+  const cuotasFiltradas = cuotas.filter(c =>
     c.clienteNombre.toLowerCase().includes(busqueda.toLowerCase()) ||
     c.codigoCredito.includes(busqueda)
   );
 
   const handleSeleccionar = (cuota: CuotaPendiente) => {
     setCuotaSeleccionada(cuota);
-    setMontoPagado(cuota.montoTotal.toFixed(2));
+    setMontoPagado((cuota.montoTotal - cuota.montoPagado).toFixed(2));
   };
 
-  const handleCobrar = () => {
+  const handleCobrar = async () => {
     if (!cuotaSeleccionada) return;
+    const montoACobrar = parseFloat(montoPagado || '0');
+    if (montoACobrar <= 0) return;
+
     setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'procesando' }));
-    setTimeout(() => {
+
+    try {
+      const nuevoMontoPagado = cuotaSeleccionada.montoPagado + montoACobrar;
+      const saldoRestante = cuotaSeleccionada.montoTotal - nuevoMontoPagado;
+      const nuevoEstado = saldoRestante <= 0.01 ? 'pagada' : 'pendiente';
+
+      const { error } = await supabase
+        .from('cuotas')
+        .update({
+          monto_pagado: nuevoMontoPagado,
+          estado: nuevoEstado,
+          fecha_pago: nuevoEstado === 'pagada' ? new Date().toISOString() : null,
+        })
+        .eq('id', cuotaSeleccionada.id);
+
+      if (error) throw error;
+
       setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'cobrado' }));
+      mostrarMsg('ok', `Cobro de S/. ${montoACobrar.toFixed(2)} registrado exitosamente para ${cuotaSeleccionada.clienteNombre}.`);
       setCuotaSeleccionada(null);
       setMontoPagado('');
-    }, 1500);
+      await cargarCuotas();
+    } catch (err: any) {
+      setEstadosPago(prev => ({ ...prev, [cuotaSeleccionada.id]: 'pendiente' }));
+      mostrarMsg('error', 'Error al registrar cobro: ' + err.message);
+    }
   };
 
   return (
@@ -55,13 +140,32 @@ export const CobroCuotas: React.FC = () => {
           <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Busca al cliente y selecciona la cuota a cobrar.</p>
         </div>
 
+        {mensaje && (
+          <div className="animate-fade" style={{
+            background: mensaje.tipo === 'ok' ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
+            border: `1px solid ${mensaje.tipo === 'ok' ? 'rgba(16,185,129,0.3)' : 'rgba(244,63,94,0.3)'}`,
+            color: mensaje.tipo === 'ok' ? 'var(--success)' : 'var(--danger)',
+            padding: '12px 18px', borderRadius: '10px', fontSize: '0.85rem', fontWeight: 500,
+          }}>
+            {mensaje.tipo === 'ok' ? '✓' : '⚠'} {mensaje.texto}
+          </div>
+        )}
+
         <div>
           <label>Buscar por Nombre o Código de Crédito</label>
           <input type="text" placeholder="Ej: Garcia o LM-0041" value={busqueda} onChange={e => setBusqueda(e.target.value)} />
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {cuotasFiltradas.map(c => {
+          {loading ? (
+            <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Cargando cuotas pendientes...</p>
+            </div>
+          ) : cuotasFiltradas.length === 0 ? (
+            <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No se encontraron cuotas pendientes.</p>
+            </div>
+          ) : cuotasFiltradas.map(c => {
             const estado = estadosPago[c.id];
             const isCobrado = estado === 'cobrado';
             const isSelected = cuotaSeleccionada?.id === c.id;
@@ -92,7 +196,7 @@ export const CobroCuotas: React.FC = () => {
                     ) : (
                       <>
                         <p style={{ fontSize: '1.15rem', fontWeight: 700, color: c.diasAtraso > 0 ? 'var(--danger)' : 'var(--text-primary)' }}>
-                          S/. {c.montoTotal.toFixed(2)}
+                          S/. {(c.montoTotal - c.montoPagado).toFixed(2)}
                         </p>
                         {c.diasAtraso > 0 && (
                           <span style={{ fontSize: '0.7rem', background: 'rgba(244,63,94,0.1)', color: 'var(--danger)', padding: '2px 8px', borderRadius: '10px', fontWeight: 600 }}>
@@ -106,12 +210,6 @@ export const CobroCuotas: React.FC = () => {
               </button>
             );
           })}
-
-          {cuotasFiltradas.length === 0 && (
-            <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No se encontraron cuotas pendientes.</p>
-            </div>
-          )}
         </div>
       </div>
 
@@ -142,10 +240,10 @@ export const CobroCuotas: React.FC = () => {
                 <input type="number" value={montoPagado} onChange={e => setMontoPagado(e.target.value)} step="0.01" min="0" />
               </div>
 
-              {parseFloat(montoPagado) < cuotaSeleccionada.montoTotal && montoPagado !== '' && (
+              {parseFloat(montoPagado) < (cuotaSeleccionada.montoTotal - cuotaSeleccionada.montoPagado) && montoPagado !== '' && (
                 <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: '10px', padding: '10px 14px' }}>
                   <p style={{ fontSize: '0.8rem', color: 'var(--warning)' }}>
-                    ⚠️ Pago parcial: Quedará un saldo pendiente de S/. {(cuotaSeleccionada.montoTotal - parseFloat(montoPagado || '0')).toFixed(2)}
+                    ⚠️ Pago parcial: Quedará un saldo pendiente de S/. {((cuotaSeleccionada.montoTotal - cuotaSeleccionada.montoPagado) - parseFloat(montoPagado || '0')).toFixed(2)}
                   </p>
                 </div>
               )}

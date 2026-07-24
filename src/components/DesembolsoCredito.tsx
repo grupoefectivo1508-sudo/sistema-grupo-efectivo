@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface CreditoListo {
   id: string;
+  solicitudId: string;
   codigo: string;
   clienteNombre: string;
   monto: number;
@@ -11,38 +13,114 @@ interface CreditoListo {
   estado: 'listo' | 'desembolsado' | 'fecha_pasada';
 }
 
-const CREDITOS_LISTOS: CreditoListo[] = [
-  { id: '1', codigo: 'LM-0104', clienteNombre: 'PAREDES LEON, Jorge',    monto: 5000, asesor: 'MLOPEZ', fechaAprobacion: '24/07/2026', diasDesdeAprobacion: 0, estado: 'listo' },
-  { id: '2', codigo: 'LM-0103', clienteNombre: 'ROMERO VASQUEZ, Sandra', monto: 2000, asesor: 'CROJAS', fechaAprobacion: '24/07/2026', diasDesdeAprobacion: 0, estado: 'listo' },
-  { id: '3', codigo: 'LM-0101', clienteNombre: 'CUBA RIOS, Alvaro',      monto: 1500, asesor: 'RPEREZ', fechaAprobacion: '20/07/2026', diasDesdeAprobacion: 4, estado: 'fecha_pasada' },
-];
-
 export const DesembolsoCredito: React.FC = () => {
-  const [creditos, setCreditos] = useState<CreditoListo[]>(CREDITOS_LISTOS);
+  const [creditos, setCreditos] = useState<CreditoListo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [creditoSeleccionado, setCreditoSeleccionado] = useState<CreditoListo | null>(null);
   const [confirmandoFechaPasada, setConfirmandoFechaPasada] = useState(false);
   const [procesando, setProcesando] = useState(false);
   const [exitoso, setExitoso] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const cargarCreditosAprobados = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('solicitudes_credito')
+        .select(`
+          id,
+          monto_solicitado,
+          fecha_solicitud,
+          estado,
+          clientes ( nombre_completo ),
+          perfiles:asesor_id ( nombre_completo )
+        `)
+        .eq('estado', 'aprobada')
+        .order('fecha_solicitud', { ascending: false });
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const hoy = new Date();
+        const mapped: CreditoListo[] = data.map((s: any, i: number) => {
+          const fechaSol = new Date(s.fecha_solicitud);
+          const diffDias = Math.floor((hoy.getTime() - fechaSol.getTime()) / (1000 * 60 * 60 * 24));
+          return {
+            id: s.id,
+            solicitudId: s.id,
+            codigo: `LM-${String(1000 + i).slice(1)}`,
+            clienteNombre: s.clientes?.nombre_completo || 'Cliente Desconocido',
+            monto: parseFloat(s.monto_solicitado) || 0,
+            asesor: s.perfiles?.nombre_completo || 'Asesor',
+            fechaAprobacion: fechaSol.toLocaleDateString('es-PE'),
+            diasDesdeAprobacion: diffDias,
+            estado: diffDias > 3 ? 'fecha_pasada' : 'listo',
+          };
+        });
+        setCreditos(mapped);
+      } else {
+        setCreditos([]);
+      }
+    } catch (err: any) {
+      console.error('Error cargando créditos aprobados:', err.message);
+      setCreditos([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { cargarCreditosAprobados(); }, []);
 
   const handleSeleccionar = (c: CreditoListo) => {
     setCreditoSeleccionado(c);
     setConfirmandoFechaPasada(false);
+    setErrorMsg(null);
   };
 
-  const handleDesembolsar = () => {
+  const handleDesembolsar = async () => {
     if (!creditoSeleccionado) return;
     if (creditoSeleccionado.estado === 'fecha_pasada' && !confirmandoFechaPasada) {
       setConfirmandoFechaPasada(true);
       return;
     }
     setProcesando(true);
-    setTimeout(() => {
-      setCreditos(prev => prev.map(c => c.id === creditoSeleccionado.id ? { ...c, estado: 'desembolsado' } : c));
-      setExitoso(creditoSeleccionado.codigo);
+    setErrorMsg(null);
+
+    try {
+      // 1. Crear el registro de crédito en la tabla creditos
+      const codigoCredito = `LM-${String(Math.floor(Math.random() * 9000) + 1000)}`;
+      const { error: errorCredito } = await supabase
+        .from('creditos')
+        .insert({
+          solicitud_id: creditoSeleccionado.solicitudId,
+          codigo_credito: codigoCredito,
+          monto_desembolsado: creditoSeleccionado.monto,
+          estado: 'activo',
+        });
+
+      if (errorCredito) throw errorCredito;
+
+      // 2. Actualizar estado de la solicitud a 'desembolsada'
+      const { error: errorSolicitud } = await supabase
+        .from('solicitudes_credito')
+        .update({ estado: 'desembolsada' })
+        .eq('id', creditoSeleccionado.solicitudId);
+
+      if (errorSolicitud) throw errorSolicitud;
+
+      // Marcar como desembolsado localmente
+      setCreditos(prev => prev.map(c => c.id === creditoSeleccionado.id ? { ...c, estado: 'desembolsado' as const } : c));
+      setExitoso(codigoCredito);
       setCreditoSeleccionado(null);
-      setProcesando(false);
       setConfirmandoFechaPasada(false);
-    }, 1800);
+
+      // Recargar lista
+      setTimeout(() => cargarCreditosAprobados(), 1500);
+    } catch (err: any) {
+      setErrorMsg('Error al desembolsar: ' + err.message);
+    } finally {
+      setProcesando(false);
+    }
   };
 
   return (
@@ -64,7 +142,23 @@ export const DesembolsoCredito: React.FC = () => {
           </div>
         )}
 
-        {creditos.map(c => {
+        {errorMsg && (
+          <div className="animate-fade" style={{ background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.3)', borderRadius: '12px', padding: '14px 18px' }}>
+            <p style={{ color: 'var(--danger)', fontWeight: 600, fontSize: '0.9rem' }}>⚠ {errorMsg}</p>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Cargando créditos aprobados...</p>
+          </div>
+        ) : creditos.filter(c => c.estado !== 'desembolsado').length === 0 ? (
+          <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
+            <p style={{ color: 'var(--success)', fontSize: '0.9rem', fontWeight: 600 }}>
+              {creditos.length === 0 ? 'No hay créditos aprobados pendientes de desembolso.' : '✓ Todos los créditos del día han sido desembolsados.'}
+            </p>
+          </div>
+        ) : creditos.map(c => {
           const isSelected    = creditoSeleccionado?.id === c.id;
           const isDesembolsado = c.estado === 'desembolsado';
           const isFechaPasada  = c.estado === 'fecha_pasada';
@@ -105,21 +199,13 @@ export const DesembolsoCredito: React.FC = () => {
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   <p style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                    S/. {c.monto.toLocaleString()}.00
+                    S/. {c.monto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}
                   </p>
                 </div>
               </div>
             </button>
           );
         })}
-
-        {creditos.filter(c => c.estado !== 'desembolsado').length === 0 && (
-          <div className="glass" style={{ padding: '40px', textAlign: 'center' }}>
-            <p style={{ color: 'var(--success)', fontSize: '0.9rem', fontWeight: 600 }}>
-              ✓ Todos los créditos del día han sido desembolsados.
-            </p>
-          </div>
-        )}
       </div>
 
       {/* Panel de confirmación */}
@@ -142,7 +228,7 @@ export const DesembolsoCredito: React.FC = () => {
                 <p style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary)' }}>{creditoSeleccionado.codigo}</p>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-primary)', marginTop: '4px' }}>{creditoSeleccionado.clienteNombre}</p>
                 <p style={{ fontSize: '1.5rem', fontWeight: 700, color: '#fff', marginTop: '8px' }}>
-                  S/. {creditoSeleccionado.monto.toLocaleString()}.00
+                  S/. {creditoSeleccionado.monto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}
                 </p>
               </div>
 

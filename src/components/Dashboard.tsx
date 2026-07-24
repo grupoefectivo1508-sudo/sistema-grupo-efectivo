@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 import { RegisterClient } from './RegisterClient';
 import { SimuladorCredito } from './SimuladorCredito';
 import { ReporteMora } from './ReporteMora';
@@ -23,23 +24,103 @@ interface DashboardProps {
 
 type Modulo = 'home' | 'caja' | 'cliente' | 'credito' | 'inversion' | 'administracion';
 
-const OPERACIONES_DEMO = [
-  { id: '1', hora: '10:45 AM', tipo: 'Ingreso',  categoria: 'Cobro Cuota',    monto: 150.00, desc: 'Cuota 3/10 — Garcia Huaman Rosa' },
-  { id: '2', hora: '11:15 AM', tipo: 'Egreso',   categoria: 'Desembolso',     monto: 3500.00, desc: 'Préstamo #LM-0104 — Torres Maria' },
-  { id: '3', hora: '11:30 AM', tipo: 'Ingreso',  categoria: 'Cobro Cuota',    monto: 220.00, desc: 'Cuota 1/12 — Medina Quispe Pedro' },
-  { id: '4', hora: '11:55 AM', tipo: 'Egreso',   categoria: 'Gasto Manual',   monto: 45.00,  desc: 'Útiles de oficina' },
-];
+interface KpiData {
+  totalClientes: number;
+  creditosActivos: number;
+  montoDesembolsadoHoy: number;
+  cuotasVencidas: number;
+}
+
+interface OperacionReciente {
+  id: string;
+  hora: string;
+  tipo: string;
+  categoria: string;
+  monto: number;
+  desc: string;
+}
 
 export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
   const [activeModule, setActiveModule]       = useState<Modulo>('home');
   const [activeSubModule, setActiveSubModule] = useState('');
   const [isBovedaOpen, setIsBovedaOpen]       = useState(true);
   const [sidebarOpen, setSidebarOpen]         = useState(true);
+  const [kpis, setKpis] = useState<KpiData>({ totalClientes: 0, creditosActivos: 0, montoDesembolsadoHoy: 0, cuotasVencidas: 0 });
+  const [operaciones, setOperaciones] = useState<OperacionReciente[]>([]);
+  const [loadingKpis, setLoadingKpis] = useState(true);
 
   const selectModule = (mod: Modulo, sub = '') => {
     setActiveModule(mod);
     setActiveSubModule(sub);
   };
+
+  // Cargar KPIs reales desde Supabase
+  useEffect(() => {
+    const cargarKPIs = async () => {
+      setLoadingKpis(true);
+      try {
+        // Total de clientes
+        const { count: totalClientes } = await supabase
+          .from('clientes')
+          .select('*', { count: 'exact', head: true });
+
+        // Créditos activos
+        const { count: creditosActivos } = await supabase
+          .from('creditos')
+          .select('*', { count: 'exact', head: true })
+          .eq('estado', 'activo');
+
+        // Monto desembolsado hoy
+        const hoy = new Date().toISOString().split('T')[0];
+        const { data: desembolsosHoy } = await supabase
+          .from('creditos')
+          .select('monto_desembolsado')
+          .gte('fecha_desembolso', hoy + 'T00:00:00')
+          .lte('fecha_desembolso', hoy + 'T23:59:59');
+
+        const montoHoy = (desembolsosHoy || []).reduce((a: number, c: any) => a + (parseFloat(c.monto_desembolsado) || 0), 0);
+
+        // Cuotas vencidas (mora)
+        const { count: cuotasVencidas } = await supabase
+          .from('cuotas')
+          .select('*', { count: 'exact', head: true })
+          .eq('estado', 'pendiente')
+          .lt('fecha_vencimiento', hoy);
+
+        setKpis({
+          totalClientes: totalClientes || 0,
+          creditosActivos: creditosActivos || 0,
+          montoDesembolsadoHoy: montoHoy,
+          cuotasVencidas: cuotasVencidas || 0,
+        });
+
+        // Operaciones recientes de caja (últimos 10 movimientos)
+        const { data: movimientos } = await supabase
+          .from('movimientos_caja')
+          .select('id, tipo_movimiento, categoria, monto, descripcion, created_at')
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        if (movimientos && movimientos.length > 0) {
+          const mapped: OperacionReciente[] = movimientos.map((m: any) => ({
+            id: m.id,
+            hora: new Date(m.created_at).toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' }),
+            tipo: m.tipo_movimiento === 'ingreso' ? 'Ingreso' : 'Egreso',
+            categoria: (m.categoria || '').replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()),
+            monto: parseFloat(m.monto) || 0,
+            desc: m.descripcion || '—',
+          }));
+          setOperaciones(mapped);
+        }
+      } catch (err) {
+        console.error('Error cargando KPIs:', err);
+      } finally {
+        setLoadingKpis(false);
+      }
+    };
+
+    cargarKPIs();
+  }, [activeModule]); // Recargar cuando vuelve al home
 
   // ----- Renderizado del área central según módulo/submódulo activo -----
   const renderContent = () => {
@@ -97,16 +178,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
 
     // Dashboard de inicio
     if (activeModule === 'home') {
+      const kpiCards = [
+        { label: 'Clientes Registrados', value: loadingKpis ? '...' : `${kpis.totalClientes}`, sub: 'Total en base de datos', color: 'var(--primary)', pct: Math.min(kpis.totalClientes, 100) },
+        { label: 'Créditos Activos',     value: loadingKpis ? '...' : `${kpis.creditosActivos}`, sub: 'Vigentes actualmente',  color: 'var(--success)', pct: Math.min(kpis.creditosActivos * 10, 100) },
+        { label: 'Desembolsos Hoy',      value: loadingKpis ? '...' : `S/. ${kpis.montoDesembolsadoHoy.toLocaleString('es-PE', { minimumFractionDigits: 2 })}`, sub: 'Monto entregado hoy', color: 'var(--warning)', pct: Math.min(kpis.montoDesembolsadoHoy / 100, 100) },
+        { label: 'Cuotas en Mora',       value: loadingKpis ? '...' : `${kpis.cuotasVencidas}`, sub: 'Vencidas sin pagar',    color: 'var(--danger)',  pct: Math.min(kpis.cuotasVencidas * 5, 100) },
+      ];
+
       return (
         <div className="animate-fade" style={s.homeGrid}>
           {/* KPIs */}
           <div style={s.kpiGrid}>
-            {[
-              { label: 'Tasa de Cobranza', value: '94.2%',        sub: '+1.5% vs ayer',   color: 'var(--success)', pct: 94  },
-              { label: 'Desembolsos Hoy',  value: 'S/. 12,500',   sub: '4 créditos',      color: 'var(--primary)', pct: 60  },
-              { label: 'Mora General',     value: '5.8%',         sub: 'Bajo control',    color: 'var(--danger)',  pct: 5.8 },
-              { label: 'Clientes Activos', value: '138',          sub: 'Esta agencia',    color: 'var(--warning)', pct: 70  },
-            ].map(k => (
+            {kpiCards.map(k => (
               <div key={k.label} className="glass" style={s.kpiCard}>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{k.label}</span>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', margin: '10px 0 12px' }}>
@@ -124,26 +207,32 @@ export const Dashboard: React.FC<DashboardProps> = ({ session, onLogout }) => {
           <div style={s.bottomRow}>
             <div className="glass" style={{ ...s.panel, flex: 2 }}>
               <h4 style={s.panelTitle}>Operaciones Recientes de Caja</h4>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    {['Hora', 'Tipo', 'Categoría', 'Descripción', 'Monto'].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {OPERACIONES_DEMO.map(op => (
-                    <tr key={op.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                      <td style={s.td}>{op.hora}</td>
-                      <td style={{ ...s.td, color: op.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)', fontWeight: 600 }}>{op.tipo}</td>
-                      <td style={s.td}>{op.categoria}</td>
-                      <td style={{ ...s.td, color: 'var(--text-primary)' }}>{op.desc}</td>
-                      <td style={{ ...s.td, textAlign: 'right', fontWeight: 700 }}>S/. {op.monto.toFixed(2)}</td>
+              {operaciones.length === 0 ? (
+                <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px', fontSize: '0.85rem' }}>
+                  {loadingKpis ? 'Cargando...' : 'No hay movimientos de caja registrados aún.'}
+                </p>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      {['Hora', 'Tipo', 'Categoría', 'Descripción', 'Monto'].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {operaciones.map(op => (
+                      <tr key={op.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td style={s.td}>{op.hora}</td>
+                        <td style={{ ...s.td, color: op.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)', fontWeight: 600 }}>{op.tipo}</td>
+                        <td style={s.td}>{op.categoria}</td>
+                        <td style={{ ...s.td, color: 'var(--text-primary)' }}>{op.desc}</td>
+                        <td style={{ ...s.td, textAlign: 'right', fontWeight: 700 }}>S/. {op.monto.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
 
             <div className="glass" style={{ ...s.panel, flex: 1 }}>

@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface Movimiento {
   id: string;
@@ -10,26 +11,66 @@ interface Movimiento {
   usuario: string;
 }
 
-const MOVIMIENTOS_DEMO: Movimiento[] = [
-  { id:'1', hora:'08:05 AM', tipo:'Ingreso', categoria:'Apertura de Caja',    descripcion:'Saldo inicial del día',                   monto:5000.00, usuario:'CROJAS' },
-  { id:'2', hora:'09:12 AM', tipo:'Ingreso', categoria:'Cobro Cuota',         descripcion:'Cuota 3/10 — Garcia Huaman Rosa',          monto:180.50,  usuario:'CROJAS' },
-  { id:'3', hora:'09:45 AM', tipo:'Egreso',  categoria:'Desembolso',          descripcion:'Crédito LM-0104 — Paredes Leon Jorge',     monto:5000.00, usuario:'CROJAS' },
-  { id:'4', hora:'10:20 AM', tipo:'Ingreso', categoria:'Cobro Cuota',         descripcion:'Cuota 1/6 — Mendoza Ramos Luis',           monto:550.00,  usuario:'CROJAS' },
-  { id:'5', hora:'11:00 AM', tipo:'Egreso',  categoria:'Desembolso',          descripcion:'Crédito LM-0103 — Romero Vasquez Sandra',  monto:2000.00, usuario:'MLOPEZ' },
-  { id:'6', hora:'11:35 AM', tipo:'Ingreso', categoria:'Cobro Cuota',         descripcion:'Cuota 7/12 — Torres Mendoza Ana',          monto:220.00,  usuario:'MLOPEZ' },
-  { id:'7', hora:'12:10 PM', tipo:'Egreso',  categoria:'Gasto Manual',        descripcion:'Útiles de oficina y papelería',            monto:45.00,   usuario:'CROJAS' },
-  { id:'8', hora:'02:30 PM', tipo:'Ingreso', categoria:'Cobro Cuota',         descripcion:'Cuota 2/8 — Campos Vega Martha',           monto:310.00,  usuario:'RPEREZ' },
-];
-
 export const OperacionesCaja: React.FC = () => {
+  const [movimientos, setMovimientos] = useState<Movimiento[]>([]);
+  const [loading, setLoading] = useState(true);
+  
   const [filtroTipo, setFiltroTipo]   = useState<'todos' | 'Ingreso' | 'Egreso'>('todos');
   const [filtroCat, setFiltroCat]     = useState('todos');
   const [filtroUser, setFiltroUser]   = useState('todos');
 
-  const categorias  = [...new Set(MOVIMIENTOS_DEMO.map(m => m.categoria))];
-  const usuarios    = [...new Set(MOVIMIENTOS_DEMO.map(m => m.usuario))];
+  const cargarMovimientos = async () => {
+    setLoading(true);
+    try {
+      const hoy = new Date().toISOString().split('T')[0];
+      
+      const { data, error } = await supabase
+        .from('movimientos_caja')
+        .select(`
+          id,
+          tipo_movimiento,
+          categoria,
+          descripcion,
+          monto,
+          created_at,
+          cajas_operacion (
+            perfiles ( nombre_completo )
+          )
+        `)
+        .gte('created_at', hoy + 'T00:00:00')
+        .lte('created_at', hoy + 'T23:59:59')
+        .order('created_at', { ascending: false });
 
-  const filtrados = MOVIMIENTOS_DEMO.filter(m => {
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const mapped: Movimiento[] = data.map((m: any) => ({
+          id: m.id,
+          hora: new Date(m.created_at).toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' }),
+          tipo: m.tipo_movimiento === 'ingreso' ? 'Ingreso' : 'Egreso',
+          categoria: (m.categoria || '').replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()),
+          descripcion: m.descripcion || '—',
+          monto: parseFloat(m.monto) || 0,
+          usuario: m.cajas_operacion?.perfiles?.nombre_completo || 'Usuario',
+        }));
+        setMovimientos(mapped);
+      } else {
+        setMovimientos([]);
+      }
+    } catch (err) {
+      console.error('Error cargando movimientos de caja:', err);
+      setMovimientos([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { cargarMovimientos(); }, []);
+
+  const categorias  = [...new Set(movimientos.map(m => m.categoria))];
+  const usuarios    = [...new Set(movimientos.map(m => m.usuario))];
+
+  const filtrados = movimientos.filter(m => {
     const matchTipo = filtroTipo === 'todos' || m.tipo === filtroTipo;
     const matchCat  = filtroCat  === 'todos' || m.categoria === filtroCat;
     const matchUser = filtroUser === 'todos' || m.usuario   === filtroUser;
@@ -46,7 +87,7 @@ export const OperacionesCaja: React.FC = () => {
       <div>
         <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Operaciones de Caja</h3>
         <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-          Movimientos del día actual en la sucursal.
+          Movimientos del día actual registrados en la base de datos.
         </p>
       </div>
 
@@ -104,35 +145,42 @@ export const OperacionesCaja: React.FC = () => {
         <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '14px' }}>
           {filtrados.length} movimiento{filtrados.length !== 1 ? 's' : ''} encontrado{filtrados.length !== 1 ? 's' : ''}
         </p>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['Hora', 'Tipo', 'Categoría', 'Descripción', 'Usuario', 'Monto'].map(h => (
-                <th key={h} style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, textAlign: 'left', paddingBottom: '12px', borderBottom: '1px solid var(--border)', paddingRight: '16px' }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filtrados.map(m => (
-              <tr key={m.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{m.hora}</td>
-                <td style={{ padding: '11px 16px 11px 0' }}>
-                  <span style={{
-                    background: m.tipo === 'Ingreso' ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
-                    color: m.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)',
-                    padding: '3px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700,
-                  }}>{m.tipo}</span>
-                </td>
-                <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{m.categoria}</td>
-                <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-primary)' }}>{m.descripcion}</td>
-                <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{m.usuario}</td>
-                <td style={{ padding: '11px 0', fontSize: '0.88rem', fontWeight: 700, color: m.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)', textAlign: 'right' }}>
-                  {m.tipo === 'Ingreso' ? '+' : '-'} S/. {m.monto.toFixed(2)}
-                </td>
+        
+        {loading ? (
+          <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px' }}>Cargando operaciones...</p>
+        ) : filtrados.length === 0 ? (
+          <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px' }}>No hay movimientos que coincidan con los filtros.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                {['Hora', 'Tipo', 'Categoría', 'Descripción', 'Usuario', 'Monto'].map(h => (
+                  <th key={h} style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, textAlign: 'left', paddingBottom: '12px', borderBottom: '1px solid var(--border)', paddingRight: '16px' }}>{h}</th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filtrados.map(m => (
+                <tr key={m.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{m.hora}</td>
+                  <td style={{ padding: '11px 16px 11px 0' }}>
+                    <span style={{
+                      background: m.tipo === 'Ingreso' ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
+                      color: m.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)',
+                      padding: '3px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700,
+                    }}>{m.tipo}</span>
+                  </td>
+                  <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{m.categoria}</td>
+                  <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-primary)' }}>{m.descripcion}</td>
+                  <td style={{ padding: '11px 16px 11px 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{m.usuario}</td>
+                  <td style={{ padding: '11px 0', fontSize: '0.88rem', fontWeight: 700, color: m.tipo === 'Ingreso' ? 'var(--success)' : 'var(--danger)', textAlign: 'right' }}>
+                    {m.tipo === 'Ingreso' ? '+' : '-'} S/. {m.monto.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

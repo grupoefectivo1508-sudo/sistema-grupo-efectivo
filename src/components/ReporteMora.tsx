@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface ClienteMora {
   id: string;
@@ -12,16 +13,6 @@ interface ClienteMora {
   celular: string;
 }
 
-const DATOS_DEMO: ClienteMora[] = [
-  { id: '1', codigo: 'LM-0041', nombre: 'GARCIA HUAMAN, Rosa Elena', asesor: 'CROJAS', diasAtraso: 3, saldoCapital: 1500, cuotasAtrasadas: 1, montoAtrasado: 180, celular: '987123456' },
-  { id: '2', codigo: 'LM-0052', nombre: 'QUISPE TAPIA, Carlos Alberto', asesor: 'MLOPEZ', diasAtraso: 15, saldoCapital: 3200, cuotasAtrasadas: 2, montoAtrasado: 760, celular: '912345678' },
-  { id: '3', codigo: 'LM-0018', nombre: 'TORRES MENDOZA, Ana Lucía', asesor: 'CROJAS', diasAtraso: 45, saldoCapital: 850, cuotasAtrasadas: 3, montoAtrasado: 310, celular: '965432187' },
-  { id: '4', codigo: 'LM-0067', nombre: 'FLORES CHAVEZ, Jorge Luis', asesor: 'RPEREZ', diasAtraso: 72, saldoCapital: 5000, cuotasAtrasadas: 5, montoAtrasado: 1850, celular: '978654321' },
-  { id: '5', codigo: 'LM-0091', nombre: 'CAMPOS VEGA, Martha Rosa', asesor: 'MLOPEZ', diasAtraso: 130, saldoCapital: 2100, cuotasAtrasadas: 8, montoAtrasado: 2100, celular: '956781234' },
-  { id: '6', codigo: 'LM-0023', nombre: 'HUANUCO RAMOS, Felix', asesor: 'CROJAS', diasAtraso: 7, saldoCapital: 900, cuotasAtrasadas: 1, montoAtrasado: 95, celular: '943217865' },
-  { id: '7', codigo: 'LM-0105', nombre: 'SALAZAR POMA, Gladys', asesor: 'RPEREZ', diasAtraso: 22, saldoCapital: 4500, cuotasAtrasadas: 2, montoAtrasado: 980, celular: '934561278' },
-];
-
 const getRangoMora = (dias: number): { label: string; color: string; bg: string } => {
   if (dias <= 8)  return { label: '0 - 8 días',    color: '#fbbf24', bg: 'rgba(251,191,36,0.1)' };
   if (dias <= 30) return { label: '9 - 30 días',   color: '#f97316', bg: 'rgba(249,115,22,0.1)' };
@@ -31,13 +22,90 @@ const getRangoMora = (dias: number): { label: string; color: string; bg: string 
 };
 
 export const ReporteMora: React.FC = () => {
+  const [datos, setDatos] = useState<ClienteMora[]>([]);
+  const [loading, setLoading] = useState(true);
+  
   const [filtroRango, setFiltroRango] = useState<string>('todos');
   const [filtroAsesor, setFiltroAsesor] = useState<string>('todos');
   const [busqueda, setBusqueda] = useState('');
 
-  const asesores = [...new Set(DATOS_DEMO.map(c => c.asesor))];
+  const cargarMora = async () => {
+    setLoading(true);
+    try {
+      const hoy = new Date().toISOString().split('T')[0];
+      
+      const { data, error } = await supabase
+        .from('cuotas')
+        .select(`
+          id,
+          fecha_vencimiento,
+          monto_total,
+          monto_capital,
+          monto_pagado,
+          creditos (
+            codigo_credito,
+            solicitudes_credito (
+              clientes ( id, nombre_completo, celular ),
+              perfiles:asesor_id ( nombre_completo )
+            )
+          )
+        `)
+        .in('estado', ['pendiente', 'mora'])
+        .lt('fecha_vencimiento', hoy);
 
-  const clientesFiltrados = DATOS_DEMO.filter(c => {
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const agrupadoporCliente = new Map<string, ClienteMora>();
+        const hoyDate = new Date(hoy);
+
+        data.forEach((c: any) => {
+          const clienteId = c.creditos?.solicitudes_credito?.clientes?.id;
+          if (!clienteId) return;
+
+          const fv = new Date(c.fecha_vencimiento);
+          const diff = Math.floor((hoyDate.getTime() - fv.getTime()) / (1000 * 60 * 60 * 24));
+          const saldo = (parseFloat(c.monto_total) || 0) - (parseFloat(c.monto_pagado) || 0);
+          const cap = parseFloat(c.monto_capital) || 0;
+
+          if (agrupadoporCliente.has(clienteId)) {
+            const ext = agrupadoporCliente.get(clienteId)!;
+            ext.diasAtraso = Math.max(ext.diasAtraso, diff);
+            ext.saldoCapital += cap;
+            ext.cuotasAtrasadas += 1;
+            ext.montoAtrasado += saldo;
+          } else {
+            agrupadoporCliente.set(clienteId, {
+              id: clienteId,
+              codigo: c.creditos?.codigo_credito || '—',
+              nombre: c.creditos?.solicitudes_credito?.clientes?.nombre_completo || 'Desconocido',
+              asesor: c.creditos?.solicitudes_credito?.perfiles?.nombre_completo || 'Desconocido',
+              diasAtraso: diff,
+              saldoCapital: cap,
+              cuotasAtrasadas: 1,
+              montoAtrasado: saldo,
+              celular: c.creditos?.solicitudes_credito?.clientes?.celular || '',
+            });
+          }
+        });
+
+        setDatos(Array.from(agrupadoporCliente.values()).sort((a,b) => b.diasAtraso - a.diasAtraso));
+      } else {
+        setDatos([]);
+      }
+    } catch (err) {
+      console.error('Error cargando reporte mora:', err);
+      setDatos([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { cargarMora(); }, []);
+
+  const asesores = [...new Set(datos.map(c => c.asesor))];
+
+  const clientesFiltrados = datos.filter(c => {
     const rango = getRangoMora(c.diasAtraso).label;
     const matchRango = filtroRango === 'todos' || rango === filtroRango;
     const matchAsesor = filtroAsesor === 'todos' || c.asesor === filtroAsesor;
@@ -52,17 +120,37 @@ export const ReporteMora: React.FC = () => {
   const rangos = ['0 - 8 días', '9 - 30 días', '31 - 60 días', '61 - 120 días', '+120 días'];
   const resumenRangos = rangos.map(r => ({
     rango: r,
-    count: DATOS_DEMO.filter(c => getRangoMora(c.diasAtraso).label === r).length,
-    monto: DATOS_DEMO.filter(c => getRangoMora(c.diasAtraso).label === r).reduce((a, c) => a + c.montoAtrasado, 0),
-    color: DATOS_DEMO.find(c => getRangoMora(c.diasAtraso).label === r) ? getRangoMora(DATOS_DEMO.find(c => getRangoMora(c.diasAtraso).label === r)!.diasAtraso).color : '#888',
+    count: datos.filter(c => getRangoMora(c.diasAtraso).label === r).length,
+    monto: datos.filter(c => getRangoMora(c.diasAtraso).label === r).reduce((a, c) => a + c.montoAtrasado, 0),
+    color: datos.find(c => getRangoMora(c.diasAtraso).label === r) ? getRangoMora(datos.find(c => getRangoMora(c.diasAtraso).label === r)!.diasAtraso).color : '#888',
   }));
+
+  const exportarAExcel = () => {
+    const cabeceras = ['Código', 'Cliente', 'Asesor', 'Rango de Mora', 'Días de Atraso', 'Cuotas Atrasadas', 'Capital', 'Monto Atrasado', 'Celular'];
+    const lineas = clientesFiltrados.map(c => 
+      `${c.codigo},"${c.nombre}","${c.asesor}",${getRangoMora(c.diasAtraso).label},${c.diasAtraso},${c.cuotasAtrasadas},${c.saldoCapital.toFixed(2)},${c.montoAtrasado.toFixed(2)},${c.celular}`
+    );
+    const csvContent = "data:text/csv;charset=utf-8," + [cabeceras.join(","), ...lineas].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Reporte_Mora_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1100px', margin: '0 auto' }}>
       {/* Encabezado */}
-      <div>
-        <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Reporte de Mora y Cobranza</h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Clasificación de cartera vencida por rangos de atraso.</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Reporte de Mora y Cobranza</h3>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Clasificación de cartera vencida por rangos de atraso.</p>
+        </div>
+        <button className="btn btn-secondary" onClick={exportarAExcel} disabled={clientesFiltrados.length === 0}>
+          📊 Exportar a Excel (CSV)
+        </button>
       </div>
 
       {/* Tarjetas de resumen por rango */}
@@ -126,43 +214,53 @@ export const ReporteMora: React.FC = () => {
         <h4 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '16px' }}>
           Detalle de Cartera en Mora ({clientesFiltrados.length} registros)
         </h4>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['Código', 'Cliente', 'Asesor', 'Rango de Mora', 'Días de Atraso', 'Cuotas Atrasadas', 'Monto Atrasado', 'Acciones'].map(h => (
-                <th key={h} style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 700, textAlign: 'left', paddingBottom: '12px', borderBottom: '1px solid var(--border)', paddingRight: '12px', whiteSpace: 'nowrap' }}>
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {clientesFiltrados.map(c => {
-              const rango = getRangoMora(c.diasAtraso);
-              return (
-                <tr key={c.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--primary)', fontWeight: 600 }}>{c.codigo}</td>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-primary)' }}>{c.nombre}</td>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{c.asesor}</td>
-                  <td style={{ padding: '12px 12px 12px 0' }}>
-                    <span style={{ background: rango.bg, color: rango.color, padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700 }}>
-                      {rango.label}
-                    </span>
-                  </td>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: rango.color, fontWeight: 700 }}>{c.diasAtraso}d</td>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>{c.cuotasAtrasadas}</td>
-                  <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--danger)', fontWeight: 700 }}>S/. {c.montoAtrasado.toFixed(2)}</td>
-                  <td style={{ padding: '12px 0' }}>
-                    <a href={`tel:${c.celular}`} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '6px 12px' }}>
-                      📞 Llamar
-                    </a>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {clientesFiltrados.length === 0 && (
+        
+        {loading ? (
+           <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '30px', fontSize: '0.9rem' }}>Cargando datos de mora...</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                {['Código', 'Cliente', 'Asesor', 'Rango de Mora', 'Días de Atraso', 'Cuotas Atrasadas', 'Monto Atrasado', 'Acciones'].map(h => (
+                  <th key={h} style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 700, textAlign: 'left', paddingBottom: '12px', borderBottom: '1px solid var(--border)', paddingRight: '12px', whiteSpace: 'nowrap' }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {clientesFiltrados.map(c => {
+                const rango = getRangoMora(c.diasAtraso);
+                return (
+                  <tr key={c.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--primary)', fontWeight: 600 }}>{c.codigo}</td>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-primary)' }}>{c.nombre}</td>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{c.asesor}</td>
+                    <td style={{ padding: '12px 12px 12px 0' }}>
+                      <span style={{ background: rango.bg, color: rango.color, padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700 }}>
+                        {rango.label}
+                      </span>
+                    </td>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: rango.color, fontWeight: 700 }}>{c.diasAtraso}d</td>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>{c.cuotasAtrasadas}</td>
+                    <td style={{ padding: '12px 12px 12px 0', fontSize: '0.85rem', color: 'var(--danger)', fontWeight: 700 }}>S/. {c.montoAtrasado.toFixed(2)}</td>
+                    <td style={{ padding: '12px 0' }}>
+                      {c.celular ? (
+                        <a href={`tel:${c.celular}`} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '6px 12px' }}>
+                          📞 Llamar
+                        </a>
+                      ) : (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Sin N°</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        
+        {!loading && clientesFiltrados.length === 0 && (
           <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '30px', fontSize: '0.9rem' }}>
             No se encontraron clientes con los filtros seleccionados.
           </p>
